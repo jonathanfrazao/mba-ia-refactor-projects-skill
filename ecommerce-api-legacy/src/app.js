@@ -1,14 +1,27 @@
 const express = require('express');
-const AppManager = require('./AppManager');
-const { config } = require('./utils');
+const settings = require('./config/settings');
+const { initDb } = require('./database');
+const checkoutRoutes = require('./routes/checkoutRoutes');
+const adminRoutes = require('./routes/adminRoutes');
+const userRoutes = require('./routes/userRoutes');
+const { errorHandler } = require('./middlewares/errorHandler');
+const logger = require('./middlewares/logger');
 
 const app = express();
 app.use(express.json());
 
-const manager = new AppManager();
-manager.initDb();
-manager.setupRoutes(app);
+app.use('/api', checkoutRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/users', userRoutes);
+app.use(errorHandler);
 
-app.listen(config.port, () => {
-    console.log(`Frankenstein LMS rodando na porta ${config.port}...`);
-});
+initDb()
+    .then(() => {
+        app.listen(settings.port, () => {
+            logger.info({ port: settings.port }, 'LMS API running');
+        });
+    })
+    .catch((err) => {
+        logger.error({ err: err.message }, 'Failed to initialize database');
+        process.exit(1);
+    });
