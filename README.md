@@ -446,3 +446,85 @@ A skill deve atingir os seguintes mínimos em **todos os 3 projetos**:
 - **Projetos diferentes exigem adaptação** — a Fase 3 de um projeto já parcialmente organizado não vai ter as mesmas transformações de um monolito. Sua skill deve se adaptar ao contexto.
 - **Pedir confirmação na Fase 2 é obrigatório** — o humano deve revisar o relatório antes de qualquer modificação.
 - **Consulte as referências do curso** — revise a documentação oficial da ferramenta escolhida e os materiais das aulas para relembrar a estrutura e anatomia de uma skill.
+
+---
+
+## Análise Manual
+
+Análise realizada antes da criação da skill. Para cada projeto foram identificados os principais problemas de arquitetura, segurança e qualidade, com arquivo, linhas e severidade exatos.
+
+---
+
+### Projeto 1 — code-smells-project (Python/Flask — API de E-commerce)
+
+**Stack:** Python · Flask 3.1.1 · flask-cors · SQLite (raw, sem ORM)  
+**Domínio:** E-commerce (produtos, usuários, pedidos, relatórios de vendas)  
+**Arquitetura atual:** Pseudo-MVC flat — `app.py` (rotas), `controllers.py` (handlers HTTP), `models.py` (acesso a dados + regras de negócio), `database.py` (singleton de conexão). Sem blueprints, sem pacotes, sem autenticação em nenhum endpoint.
+
+| # | Severidade | Problema | Arquivo | Linhas |
+|---|---|---|---|---|
+| 1 | CRITICAL | SQL Injection em toda a camada de dados — queries construídas por concatenação de strings | `models.py` | 28, 47–49, 57–61, 68, 92, 110, 126–128, 140, 149–150, 155–165, 174, 280–281, 291–297 |
+| 2 | CRITICAL | Endpoint `/admin/query` executa SQL arbitrário recebido no body sem autenticação | `app.py` | 59–78 |
+| 3 | CRITICAL | Senhas armazenadas em texto plano + SECRET_KEY hardcoded exposta no response do `/health` | `models.py`, `database.py`, `controllers.py` | `models.py:128`, `database.py:76–83`, `controllers.py:287–289` |
+| 4 | HIGH | Lógica de negócio (validação de estoque, cálculo de total, decremento de estoque) dentro da camada Model | `models.py` | 133–169 |
+| 5 | HIGH | Endpoint `/admin/reset-db` apaga todas as tabelas sem autenticação | `app.py` | 47–57 |
+| 6 | MEDIUM | N+1 queries na listagem de pedidos — 3 níveis de cursores aninhados por pedido | `models.py` | 171–201, 203–233 |
+| 7 | MEDIUM | Validação de `criar_produto` e `atualizar_produto` duplicada literalmente entre as duas funções | `controllers.py` | 28–55, 73–85 |
+| 8 | MEDIUM | Conexão SQLite como singleton global mutável sem thread safety real em ambiente concorrente | `database.py` | 4–10 |
+| 9 | LOW | `print()` usado como único mecanismo de logging — sem nível, sem timestamp estruturado | `controllers.py` | 8, 57, 106, 161, 179, 208–210, 219, 248–250 |
+| 10 | LOW | Serialização de `Row` para `dict` reimplementada manualmente em cada função de leitura, sem `to_dict()` centralizado | `models.py` | 10–21, 31–40, 79–86, 95–102 |
+
+**Resumo:** 3 CRITICAL · 2 HIGH · 3 MEDIUM · 2 LOW
+
+**Por que é relevante para a skill:** SQL Injection por concatenação é o padrão mecânico mais importante para detectar automaticamente. A ausência de hash de senha e a exposição da `SECRET_KEY` no health check são sinais diretos de credencial insegura. O endpoint `/admin/query` representa o anti-pattern de "operação perigosa sem autenticação" que a skill deve sinalizar.
+
+---
+
+### Projeto 2 — ecommerce-api-legacy (Node.js/Express — LMS API com checkout)
+
+**Stack:** Node.js · Express 4.18.2 · sqlite3 5.1.6 · sem ORM · sem autenticação  
+**Domínio:** LMS (cursos, matrículas, pagamentos, usuários)  
+**Arquitetura atual:** God Object — `AppManager.js` concentra roteamento, acesso a dados, lógica de negócio, processamento de pagamento e auditoria em 141 linhas. Banco de dados em memória (`:memory:`).
+
+| # | Severidade | Problema | Arquivo | Linhas |
+|---|---|---|---|---|
+| 1 | CRITICAL | Credenciais de produção hardcoded — chave de gateway live (`pk_live_...`), senha de DB e SMTP | `utils.js` | 1–7 |
+| 2 | CRITICAL | Algoritmo de criptografia customizado e inseguro (`badCrypto`) — base64 não é hash; resultado de 10 chars, colisões triviais | `utils.js` | 17–23 |
+| 3 | CRITICAL | Banco de dados em memória (`:memory:`) — perda total de dados a cada restart | `AppManager.js` | 7 |
+| 4 | CRITICAL | God Object — ausência total de separação de responsabilidades; rotas + DB + pagamento + auditoria em uma classe | `AppManager.js` | 1–141 |
+| 5 | HIGH | Lógica de aprovação de pagamento por prefixo de cartão (`cc.startsWith("4")`) + número do cartão logado no console | `AppManager.js` | 44–48 |
+| 6 | HIGH | Callback hell de 5 níveis no handler de checkout, sem tratamento uniforme de erros | `AppManager.js` | 36–78 |
+| 7 | HIGH | DELETE de usuário sem cascade — matrículas e pagamentos ficam órfãos; documentado na própria resposta HTTP | `AppManager.js` | 131–137 |
+| 8 | MEDIUM | Cache global mutável (`globalCache`) sem TTL, compartilhado entre requisições sem sincronização | `utils.js` | 9, 12–15 |
+| 9 | MEDIUM | `totalRevenue` declarado e exportado mas nunca incrementado — dead code que simula feature inexistente | `utils.js` | 10, 25 |
+| 10 | LOW | Variáveis de payload com nomes de 1–2 letras sem semântica (`u`, `e`, `p`, `cid`, `cc`) | `AppManager.js` | 29–34 |
+| 11 | LOW | Erro não verificado no callback do DELETE — resposta de sucesso enviada mesmo em caso de falha no banco | `AppManager.js` | 132–136 |
+
+**Resumo:** 4 CRITICAL · 3 HIGH · 2 MEDIUM · 2 LOW
+
+**Por que é relevante para a skill:** Este projeto representa o cenário mais extremo de violação arquitetural — a skill precisa reconhecer o padrão God Object pelo acúmulo de responsabilidades em uma única classe. A detecção de `Database(':memory:')`, credenciais hardcoded fora de `process.env` e callbacks com mais de 3 níveis de aninhamento são sinais de detecção diretamente acionáveis nos arquivos de referência.
+
+---
+
+### Projeto 3 — task-manager-api (Python/Flask — API de Task Manager)
+
+**Stack:** Python · Flask 3.0.0 · Flask-SQLAlchemy 3.1.1 · flask-cors · marshmallow (instalado, não usado) · python-dotenv (instalado, não usado)  
+**Domínio:** Gerenciamento de tarefas (tasks, usuários, categorias, relatórios de produtividade)  
+**Arquitetura atual:** MVC incompleto — estrutura de pastas correta (`routes/`, `models/`, `services/`, `utils/`), mas sem autenticação real, com lógica duplicada entre camadas e utilitários definidos porém ignorados pelas rotas.
+
+| # | Severidade | Problema | Arquivo | Linhas |
+|---|---|---|---|---|
+| 1 | CRITICAL | Senhas hasheadas com MD5 sem salt — algoritmo criptograficamente quebrado desde 2004, vulnerável a rainbow table | `models/user.py` | 27–32 |
+| 2 | CRITICAL | Credenciais de email hardcoded na classe `NotificationService` | `services/notification_service.py` | 8–10 |
+| 3 | CRITICAL | Token de autenticação fake e previsível (`'fake-jwt-token-' + str(user.id)`) — não verificado em nenhum endpoint | `routes/user_routes.py` | 210 |
+| 4 | HIGH | Hash MD5 da senha exposto em todos os responses de usuário via `to_dict()` | `models/user.py` | 16–25 |
+| 5 | HIGH | Lógica `is_overdue` duplicada em 6 locais diferentes — método `is_overdue()` existe no Model mas nunca é chamado | `routes/task_routes.py`, `routes/user_routes.py`, `routes/report_routes.py`, `models/task.py` | `task_routes.py:30–39,71–80,171–181,284–288` · `report_routes.py:33–44,131–135` · `task.py:50–60` |
+| 6 | HIGH | N+1 queries no relatório de produtividade — query individual por usuário dentro de loop | `routes/report_routes.py` | 53–68 |
+| 7 | MEDIUM | Funções utilitárias (`validate_email`, `process_task_data`) e constantes (`VALID_STATUSES`, `VALID_ROLES`) em `helpers.py` definidas mas não usadas pelas rotas, que duplicam a mesma lógica inline | `utils/helpers.py`, `routes/task_routes.py`, `routes/user_routes.py` | `helpers.py:19–23,57–116,110–116` |
+| 8 | MEDIUM | SECRET_KEY hardcoded — `python-dotenv` instalado mas `load_dotenv()` nunca chamado | `app.py` | 13 |
+| 9 | LOW | Imports não utilizados em múltiplos arquivos (`json`, `os`, `sys`, `time`, `math`) | `routes/task_routes.py`, `routes/user_routes.py`, `utils/helpers.py` | `task_routes.py:7` · `user_routes.py:6` · `helpers.py:1–8` |
+| 10 | LOW | Serialização manual campo a campo em `get_tasks()` e `get_user_tasks()` quando `task.to_dict()` já existe e é usado em outros handlers do mesmo arquivo | `routes/task_routes.py`, `routes/user_routes.py` | `task_routes.py:16–58` · `user_routes.py:161–182` |
+
+**Resumo:** 3 CRITICAL · 3 HIGH · 2 MEDIUM · 2 LOW
+
+**Por que é relevante para a skill:** Este projeto prova que estrutura de pastas organizada não equivale a arquitetura saudável. A skill precisa ir além da estrutura de diretórios e inspecionar o conteúdo — detectando `hashlib.md5` em métodos de senha, `to_dict()` que expõe campo `password`, tokens gerados por concatenação de string, e métodos do Model definidos porém nunca chamados nas rotas. O `python-dotenv` instalado sem uso é um sinal de configuração incompleta detectável pela análise de dependências vs. código.
